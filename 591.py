@@ -78,27 +78,64 @@ class UrlGenerator:
 
 # 取得所有條件的房子，對新來的物件進行推送通知
 def Craw591():
-    houseEntity = Entity()
-    houseList = houseEntity.Convert(GetHouseList())
+    
+     # 轉成好讀版
+    # alert = FilterHouse(user, houseList, ) # 找誰需要通知
+    
     return houseList
     
 # 從 API List 中列出所有的房子
 def GetHouseList():
+    dynamodb = boto3.resource('dynamodb')
+    table = dynamodb.Table("UserID")
     session = requests.session()
+    houseEntity = Entity()
+    
     returnParams = []
     genUrl = UrlGenerator()
 
     token = GetCSRFTokenFromHtml(Get591Response(session))
-    urls = genUrl.GetHouseListApiRoute()
+    urls = list(GetHouseListFromDB())
+    
+    for user, condition, queryString in urls:
+        c = CryptoEntity(user)
+        encrypted_data = c.encrypt(json.dumps(houseEntity.Convert([Get591Response(session, queryString, token)])))
+        table.update_item(
+            Key={
+                'user': user,
+                'condition': condition
+            },
+            UpdateExpression='set assemble=:d, updateTime=:t',
+            ExpressionAttributeValues={
+                ':d': encrypted_data,
+                ':t': int(time.time())
+            },
+            ReturnValues="NON")
+        returnParams.append(encrypted_data)
         
-    for url in urls:
-        returnParams.append(Get591Response(session, url, token))
-
     return returnParams
+    
+def GetHouseListFromDB():
+    dynamodb = boto3.resource('dynamodb')
+    table = dynamodb.Table("UserID")
+
+    done = False
+    start_key = None
+    ret = []
+    while not done:
+        response = table.scan()
+        ret = response.get('Items', [])
+        start_key = response.get('LastEvaluatedKey', None)
+        done = start_key is None
+    
+    for data in ret:
+        c = CryptoEntity(data['user'])
+        yield ([data['user'], data['condition'], c.decrypt(data['condition'].value)])
+
 
 # 取得 591 的回應，如果不是拿 CSRF 偷啃的話一定要帶其他參數
 def Get591Response(session, route=None, csrfToken=None): #一定要同一個 session
-    url = UrlGenerator.BaseUrl + route if route else UrlGenerator.BaseUrl
+    url = UrlGenerator.BaseUrl + ("home/search/rsList" + route) if route else UrlGenerator.BaseUrl
 
     if(csrfToken):
         headers = {"X-CSRF-TOKEN": csrfToken, "X-Requested-With" : "XMLHttpRequest"}
@@ -115,12 +152,21 @@ def GetCSRFTokenFromHtml(html):
 
 # 揪出新來的菜逼八
 def FilterHouse(houseList):
-    pass
+    returnParams = []
+    for house in houseList:
+        if(house['isNew']):
+            returnParams.append(house)
+            house['isNew'] = False
+    return returnParams
 
-if __name__ == '__main__':
-
-    print((Craw591()))
-
+def lambda_handler(event, context):
+    # c = CryptoEntity('外面來的ID')
+    
+    
+    print((GetHouseList()))
+    
+    return
+    
     exit()
 
 
@@ -158,3 +204,61 @@ if __name__ == '__main__':
 
     print("Done")
     exit()
+
+
+
+def create_presigned_post(bucket_name, object_name,
+                          fields=None, conditions=None, expiration=600):
+    """Generate a presigned URL S3 POST request to upload a file
+
+    :param bucket_name: string
+    :param object_name: string
+    :param fields: Dictionary of prefilled form fields
+    :param conditions: List of conditions to include in the policy
+    :param expiration: Time in seconds for the presigned URL to remain valid
+    :return: Dictionary with the following keys:
+        url: URL to post to
+        fields: Dictionary of form fields and values to submit with the POST
+    :return: None if error.
+    """
+
+    # Generate a presigned S3 POST URL
+    s3_client = boto3.client('s3', region_name = 'ap-northeast-1')
+    try:
+        response = s3_client.generate_presigned_post(bucket_name,
+                                                     object_name,
+                                                     Fields=fields,
+                                                     Conditions=conditions,
+                                                     ExpiresIn=expiration)
+    except ClientError as e:
+        logging.error(e)
+        return None
+    
+    # The response contains the presigned URL and required fields
+    return response
+    
+def create_presigned_url(bucket_name, object_name, expiration=600):
+    """Generate a presigned URL to share an S3 object
+
+    :param bucket_name: string
+    :param object_name: string
+    :param expiration: Time in seconds for the presigned URL to remain valid
+    :return: Presigned URL as string. If error, returns None.
+    """
+
+    # Generate a presigned URL for the S3 object
+    s3_client = boto3.client('s3')
+    try:
+        response = s3_client.generate_presigned_url('get_object',
+                                                    Params={'Bucket': bucket_name,
+                                                            'Key': object_name},
+                                                    ExpiresIn=expiration)
+    except ClientError as e:
+        logging.error(e)
+        return None
+
+    # The response contains the presigned URL
+    return response
+
+if __name__ == "__main__":
+    lambda_handler()
